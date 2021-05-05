@@ -30,14 +30,55 @@
 #include "config.h"
 #include "logger.h"
 
+struct Device {
+  // run-dependant settings
+  alt_u32 thresh_delta;
+  alt_u32 rshaper;
+  alt_u32 rfm_on;
+
+  char *ip_addr;
+  int run_cnt;
+
+  // baseline settings
+  alt_u32 dac_floor_table[NB_RFM * NB_HR * 3];
+  alt_u32 pa_gain_table[NB_RFM * NB_HR * 64];
+  alt_u32 mask_table[NB_RFM * NB_HR * 64];
+
+  int sock_cp;
+  int sock_ctl;
+
+  int mem_fd;
+
+  char daq_filename[128];
+  FILE *daq_file;
+  alt_u32 cycle_id; // run counters
+};
+
 #define PORT 8877
+#define NB_READOUTS_PER_FILE 10000
+
+int g_state = 1;
+
+#include <signal.h>
+void handle_sigint(int sig) {
+  log_printf("Caught signal %d\n", sig);
+  log_flush();
+  g_state = 0;
+}
 
 int device_init_mmap(Device_t *ctx);
 int device_init_fpga(Device_t *ctx);
 int device_init_hrsc(Device_t *ctx);
 
+int device_init_run(Device_t *ctx);
+int device_loop(Device_t *ctx);
+
+void give_file_to_server(char *filename, int sock);
+
 Device_t *new_device() {
   Device_t *ctx = (Device_t *)calloc(1, sizeof(Device_t));
+  signal(SIGINT, handle_sigint);
+
   return ctx;
 }
 
@@ -196,6 +237,11 @@ void device_free(Device_t *ctx) {
     munmap_h2f(ctx->mem_fd);
     close(ctx->mem_fd);
   }
+
+  if (ctx->daq_file != 0) {
+    fclose(ctx->daq_file);
+  }
+
   free(ctx);
   ctx = NULL;
 }
@@ -365,6 +411,192 @@ int device_init_hrsc(Device_t *ctx) {
   sleep(1); // let DACs stabilize
 
   return 0;
+}
+
+int device_start(Device_t *ctx) {
+  int err = 0;
+
+  // init run----------------------------------------------------------
+  err = device_init_run(ctx);
+  if (err != 0) {
+    return err;
+  }
+
+  // wait for reset BCID
+  log_printf("waiting for reset_BCID command\n");
+  log_flush();
+  send(ctx->sock_ctl, "eda-ready", 9, 0);
+
+  int dcc_cmd = 0xE;
+  while (dcc_cmd != CMD_RESET_BCID) {
+    while (SYNC_dcc_cmd_mem() == dcc_cmd) {
+      if (g_state == 0)
+        break;
+    }
+    dcc_cmd = SYNC_dcc_cmd_mem();
+    // log_printf("sDCC command = %d\n",dcc_cmd);
+    if (g_state == 0)
+      break;
+  }
+  if (g_state == 0) {
+    return -1;
+  }
+  log_printf("SYNC_state()=%d\n", SYNC_state());
+  log_printf("reset_BCID done\n");
+  log_flush();
+
+  CNT_reset();
+  CNT_start();
+  for (int rfm_index = 0; rfm_index < NB_RFM; rfm_index++) {
+    if (((ctx->rfm_on >> rfm_index) & 1) == 1) {
+      DAQ_fifo_init(rfm_index);
+    }
+  }
+
+  ctx->cycle_id = 0;
+  SYNC_fifo_arming();
+
+  return 0;
+}
+
+int device_wait(Device_t *ctx) {
+  //
+  return 0;
+}
+
+int device_stop(Device_t *ctx) {
+  // close current daq file
+  fclose(ctx->daq_file);
+  ctx->daq_file = NULL;
+
+  give_file_to_server(ctx->daq_filename, ctx->sock_cp);
+  return 0;
+}
+
+int device_init_run(Device_t *ctx) {
+  // save run-dependant settings
+  log_printf("thresh_delta=%lu, Rshaper=%lu, rfm_on[3:0]=%lu\n",
+             ctx->thresh_delta, ctx->rshaper, ctx->rfm_on);
+  log_flush();
+  char settings_filename[128];
+  sprintf(settings_filename, "/home/root/run/settings_%03d.csv", ctx->run_cnt);
+  FILE *settings_file = fopen(settings_filename, "w");
+  if (!settings_file) {
+    log_printf("could not open file %s\n", settings_filename);
+    log_flush();
+    return -1;
+  }
+  fprintf(
+      settings_file,
+      "thresh_delta=%lu; Rshaper=%lu; rfm_on[3:0]=%lu; ip_addr=%s; run_id=%d",
+      ctx->thresh_delta, ctx->rshaper, ctx->rfm_on, ctx->ip_addr, ctx->run_cnt);
+  fclose(settings_file);
+  give_file_to_server(settings_filename, ctx->sock_cp);
+
+  log_printf("-----------------RUN NB %d-----------------\n", ctx->run_cnt);
+  log_flush();
+
+  // FIXME(sbinet): replace with a pair of open_memstream(3).
+  // prepare run file
+  sprintf(
+      ctx->daq_filename, "/dev/shm/eda_%03d.000.raw",
+      ctx->run_cnt); // use tmpfs for daq (to reduce writings on µSD flash mem)
+  ctx->daq_file = fopen(ctx->daq_filename, "w");
+  if (!ctx->daq_file) {
+    log_printf("unable to open file %s\n", ctx->daq_filename);
+    log_flush();
+    return -1;
+  }
+  // init run counters
+  ctx->cycle_id = 0;
+
+  SYNC_reset_hr();
+
+  return 0;
+}
+
+int device_loop(Device_t *ctx) {
+  int file_cnt = 0;
+  //----------- run loop -----------------
+  while (g_state == 1) {
+    // wait until new readout is started
+    log_printf("trigger %07lu\n\tacq\n", ctx->cycle_id);
+    log_flush();
+    while ((SYNC_fpga_ro() == 0) && (g_state == 1)) {
+      ;
+    }
+    if (g_state == 0) {
+      break;
+	}
+
+    log_printf("\treadout\n");
+    log_flush();
+    // wait until readout is done
+    while ((SYNC_fifo_ready() == 0) && (g_state == 1)) {
+      ;
+    }
+    if (g_state == 0) {
+      break;
+	}
+
+    // read hardroc data
+    log_printf("\tbuffering\n");
+    log_flush();
+    for (int rfm_index = 0; rfm_index < NB_RFM; rfm_index++) {
+      if (((ctx->rfm_on >> rfm_index) & 1) == 1) {
+        log_printf("\t\trfm %d\n", rfm_index);
+        log_flush();
+        DAQ_bufferize_data_DIF(rfm_index);
+        if (g_state == 0)
+          break;
+      }
+    }
+    SYNC_fifo_ack();
+    
+	// write data file
+    log_printf("\tfwrite\n");
+    log_flush();
+    DAQ_write_buffer(ctx->daq_file);
+    log_printf("\tdone\n");
+    log_flush();
+
+    ctx->cycle_id++;
+    if ((ctx->cycle_id % NB_READOUTS_PER_FILE) == 0) {
+      fclose(ctx->daq_file);
+      give_file_to_server(ctx->daq_filename, ctx->sock_cp);
+      // prepare new file
+      memset(ctx->daq_filename, 0, 128);
+      file_cnt++;
+      sprintf(ctx->daq_filename, "/dev/shm/eda_%03d.%03d.raw", ctx->run_cnt,
+              file_cnt);
+      ctx->daq_file = fopen(ctx->daq_filename, "w");
+    }
+  }
+  CNT_stop();
+
+  return 0;
+}
+
+void give_file_to_server(char *filename, int sock) {
+  log_printf("send copy request to eda-srv\n");
+  log_flush();
+  alt_u32 length;
+  alt_u8 length_litend[4] = {0};
+  char sock_read_buf[4] = {0};
+  int valread;
+  // send lenght of filename (uint32 little endian) to server
+  length = strlen(filename);
+  length_litend[0] = length; // length < 128 < 256
+  send(sock, length_litend, 4, 0);
+  // send filename to server
+  send(sock, filename, length, 0);
+  // wait server ack
+  valread = read(sock, sock_read_buf, 3);
+  if ((valread != 3) || (strcmp(sock_read_buf, "ACK") != 0)) {
+    log_printf("instead of ACK, received :%s\n", sock_read_buf);
+    log_flush();
+  }
+  return;
 }
 
 // static variables, with file-scope
