@@ -27,6 +27,345 @@
  */
 
 #include "device.h"
+#include "config.h"
+#include "logger.h"
+
+#define PORT 8877
+
+int device_init_mmap(Device_t *ctx);
+int device_init_fpga(Device_t *ctx);
+int device_init_hrsc(Device_t *ctx);
+
+Device_t *new_device() {
+  Device_t *ctx = (Device_t *)calloc(1, sizeof(Device_t));
+  return ctx;
+}
+
+int device_configure(Device_t *ctx, alt_u32 thresh, alt_u32 rshaper,
+                     alt_u32 rfm, const char *ip, int run) {
+  ctx->thresh_delta = thresh;
+  ctx->rshaper = rshaper;
+  ctx->rfm_on = rfm;
+  ctx->ip_addr = strdup(ip);
+  ctx->run_cnt = run;
+
+  // fixed-location, temporary, line-buffered log file
+  log_init();
+
+  // copy base settings files from clrtodaq0 (using ssh keys)
+  char command[128];
+  sprintf(
+      command,
+      "scp -P 1122 -r mim@193.48.81.203:/mim/soft/eda/config_base /dev/shm/");
+
+  int err = 0;
+  err = system(command);
+  if (err != 0) {
+    log_printf("could not copy base settings from clrtodaq\n");
+    return err;
+  }
+
+  // load files to tables
+  // single-HR configuration file
+  FILE *conf_base_file = fopen("/dev/shm/config_base/conf_base.csv", "r");
+  if (!conf_base_file)
+    return -1;
+  if (HRSC_read_conf_singl(conf_base_file, 0) < 0) {
+    fclose(conf_base_file);
+    return -1;
+  }
+  fclose(conf_base_file);
+
+  // floor thresholds
+  FILE *dac_floor_file = fopen("/dev/shm/config_base/dac_floor_4rfm.csv", "r");
+  if (!dac_floor_file)
+    return -1;
+  if (read_th_offset(dac_floor_file, ctx->dac_floor_table) < 0) {
+    fclose(dac_floor_file);
+    return -1;
+  }
+  fclose(dac_floor_file);
+
+  // preamplifier gains
+  FILE *pa_gain_file = fopen("/dev/shm/config_base/pa_gain_4rfm.csv", "r");
+  if (!pa_gain_file)
+    return -1;
+  if (read_pa_gain(pa_gain_file, ctx->pa_gain_table) < 0) {
+    fclose(pa_gain_file);
+    return -1;
+  }
+  fclose(pa_gain_file);
+
+  // masks
+  FILE *mask_file = fopen("/dev/shm/config_base/mask_4rfm.csv", "r");
+  if (!mask_file)
+    return -1;
+  if (read_mask(mask_file, ctx->mask_table) < 0) {
+    fclose(mask_file);
+    return -1;
+  }
+  fclose(mask_file);
+
+  // create socket (for DAQ file copy)---------------------------------
+
+  // for copy server (on clrtodaq x)
+  ctx->sock_cp = 0;
+  struct sockaddr_in serv_addr_cp;
+
+  if ((ctx->sock_cp = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    log_printf("\n Socket creation error \n");
+    log_flush();
+    return -1;
+  }
+  serv_addr_cp.sin_family = AF_INET;
+  serv_addr_cp.sin_port = htons(PORT);
+
+  // Convert IPv4 and IPv6 addresses from text to binary form
+  if (inet_pton(AF_INET, ctx->ip_addr, &serv_addr_cp.sin_addr) <= 0) {
+    log_printf("\nInvalid address/ Address %s not supported \n", ctx->ip_addr);
+    log_flush();
+    return -1;
+  }
+
+  if (connect(ctx->sock_cp, (struct sockaddr *)&serv_addr_cp,
+              sizeof(serv_addr_cp)) < 0) {
+    log_printf("\nSocket Connection Failed \n");
+    log_flush();
+    return -1;
+  }
+
+  // for eda-ctl (on localhost)
+  ctx->sock_ctl = 0;
+  struct sockaddr_in serv_addr_ctl;
+
+  if ((ctx->sock_ctl = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    log_printf("\n Socket creation error \n");
+    log_flush();
+    return -1;
+  }
+  serv_addr_ctl.sin_family = AF_INET;
+  serv_addr_ctl.sin_port = htons(PORT);
+
+  // Convert IPv4 and IPv6 addresses from text to binary form
+  if (inet_pton(AF_INET, "127.0.0.1", &serv_addr_ctl.sin_addr) <= 0) {
+    log_printf("\nInvalid address/ Address %s not supported \n", "127.0.0.1");
+    log_flush();
+    return -1;
+  }
+
+  if (connect(ctx->sock_ctl, (struct sockaddr *)&serv_addr_ctl,
+              sizeof(serv_addr_ctl)) < 0) {
+    log_printf("\nSocket Connection Failed \n");
+    log_flush();
+    return -1;
+  }
+
+  return 0;
+}
+
+int device_initialize(Device_t *ctx) {
+  // FPGA-HPS memory mapping-------------------------------------------
+  if (!device_init_mmap(ctx)) {
+    return -1;
+  }
+
+  // Init FPGA---------------------------------------------------------
+  if (!device_init_fpga(ctx)) {
+    return -1;
+  }
+
+  // HR configuration--------------------------------------------------
+  if (!device_init_hrsc(ctx)) {
+    return -1;
+  }
+
+  return 0;
+}
+
+void device_free(Device_t *ctx) {
+  free(ctx->ip_addr);
+
+  if (ctx->sock_cp != 0) {
+    close(ctx->sock_cp);
+  }
+  if (ctx->sock_ctl != 0) {
+    close(ctx->sock_ctl);
+  }
+  if (ctx->mem_fd != 0) {
+    munmap_lw_h2f(ctx->mem_fd);
+    munmap_h2f(ctx->mem_fd);
+    close(ctx->mem_fd);
+  }
+  free(ctx);
+  ctx = NULL;
+}
+
+int device_init_mmap(Device_t *ctx) {
+  ctx->mem_fd = 0;
+  if ((ctx->mem_fd = open("/dev/mem", (O_RDWR | O_SYNC))) == -1) {
+    log_printf("ERROR: could not open \"/dev/mem\"...\n");
+    log_flush();
+    ctx->mem_fd = 0;
+    return -1;
+  }
+  // lightweight HPS to FPGA bus
+  if (!mmap_lw_h2f(ctx->mem_fd)) {
+    close(ctx->mem_fd);
+    ctx->mem_fd = 0;
+    return -1;
+  }
+  // HPS to FPGA bus
+  if (!mmap_h2f(ctx->mem_fd)) {
+    munmap_lw_h2f(ctx->mem_fd);
+    close(ctx->mem_fd);
+    ctx->mem_fd = 0;
+    return -1;
+  }
+
+  return 0;
+}
+
+int device_init_fpga(Device_t *ctx) {
+  // reset fpga and set clock
+  SYNC_reset_fpga();
+  usleep(2);
+  // make sure the pll is locked
+  int cnt_poll = 0;
+  while ((!SYNC_pll_lck()) && (cnt_poll < 100)) {
+    usleep(10000);
+    cnt_poll++;
+  }
+  if (cnt_poll >= 100) {
+    log_printf("the PLL is not locked\n");
+    log_flush();
+    return -1;
+  }
+  log_printf("the PLL is locked\n");
+  log_printf("pll lock=%d\n", SYNC_pll_lck());
+  log_flush();
+
+  // activate RFMs
+  int rfm_index;
+  for (rfm_index = 0; rfm_index < NB_RFM; rfm_index++) {
+    if (((ctx->rfm_on >> rfm_index) & 1) == 1) {
+      RFM_on(rfm_index);
+      RFM_enable(rfm_index);
+    }
+  }
+  sleep(1);
+  log_printf("control pio=%lx\n", PIO_ctrl_get());
+  log_flush();
+
+  SYNC_select_command_dcc();
+  SYNC_enable_dcc_busy();
+  SYNC_enable_dcc_ramfull();
+
+  return 0;
+}
+
+int device_init_hrsc(Device_t *ctx) {
+  HRSC_set_bit(0, 854,
+               0); // disable trig_out output pin (RFM v1 coupling problem)
+  HRSC_set_shaper_resis(0, ctx->rshaper);
+  HRSC_set_shaper_capa(0, 3);
+
+  HRSC_copy_conf(0, 1);
+  HRSC_copy_conf(0, 2);
+  HRSC_copy_conf(0, 3);
+  HRSC_copy_conf(0, 4);
+  HRSC_copy_conf(0, 5);
+  HRSC_copy_conf(0, 6);
+  HRSC_copy_conf(0, 7);
+
+  // set chip ids
+  alt_u32 hr_addr, chan;
+  for (hr_addr = 0; hr_addr < 8; hr_addr++)
+    HRSC_set_chip_id(hr_addr, hr_addr);
+
+  // prepare config file (for history)
+  char sc_filename[128];
+  sprintf(sc_filename, "/home/root/run/hr_sc_%03d.csv", ctx->run_cnt);
+  FILE *sc_file = fopen(sc_filename, "w");
+  if (!sc_file) {
+    log_printf("could not open file %s\n", sc_filename);
+    log_flush();
+    return -1;
+  }
+
+  // for each active RFM, tune the configuration and send it
+  for (int rfm_index = 0; rfm_index < NB_RFM; rfm_index++) {
+    if (((ctx->rfm_on >> rfm_index) & 1) == 1) {
+      // set mask
+      alt_u32 mask;
+      for (hr_addr = 0; hr_addr < 8; hr_addr++) {
+        for (chan = 0; chan < 64; chan++) {
+          mask = ctx->mask_table[64 * (NB_HR * rfm_index + hr_addr) + chan];
+          log_printf("%u      %u      %u\n", (uint32_t)hr_addr, (uint32_t)chan,
+                     (uint32_t)mask);
+          log_flush();
+          HRSC_set_mask(hr_addr, chan, mask);
+        }
+      }
+      // set DAC thresholds
+      log_printf("HR      thresh0     thresh1     thresh2\n");
+      log_flush();
+      alt_u32 th0, th1, th2;
+      for (hr_addr = 0; hr_addr < 8; hr_addr++) {
+        th0 = ctx->dac_floor_table[3 * (NB_HR * rfm_index + hr_addr)] +
+              ctx->thresh_delta;
+        th1 = ctx->dac_floor_table[3 * (NB_HR * rfm_index + hr_addr) + 1] +
+              ctx->thresh_delta;
+        th2 = ctx->dac_floor_table[3 * (NB_HR * rfm_index + hr_addr) + 2] +
+              ctx->thresh_delta;
+        log_printf("%u      %u      %u      %u\n", (uint32_t)hr_addr,
+                   (uint32_t)th0, (uint32_t)th1, (uint32_t)th2);
+        log_flush();
+        HRSC_set_DAC0(hr_addr, th0);
+        HRSC_set_DAC1(hr_addr, th1);
+        HRSC_set_DAC2(hr_addr, th2);
+      }
+      // set preamplifier gain
+      log_printf("HR      chan        pa_gain\n");
+      log_flush();
+      alt_u32 pa_gain;
+      for (hr_addr = 0; hr_addr < 8; hr_addr++) {
+        for (chan = 0; chan < 64; chan++) {
+          pa_gain =
+              ctx->pa_gain_table[64 * (NB_HR * rfm_index + hr_addr) + chan];
+          log_printf("%u      %u      %u\n", (uint32_t)hr_addr, (uint32_t)chan,
+                     (uint32_t)pa_gain);
+          log_flush();
+          HRSC_set_preamp(hr_addr, chan, pa_gain);
+        }
+      }
+      // send to HRs
+      if (HRSC_set_config(rfm_index) < 0) {
+        PRINT_config(stderr, rfm_index);
+        return -1;
+      }
+      log_printf("Hardroc configuration done\n");
+      log_flush();
+      if (HRSC_reset_read_registers(rfm_index) < 0) {
+        PRINT_config(stderr, rfm_index);
+        return -1;
+      }
+      fprintf(sc_file, "#RFM_INDEX= %d ------------------------\n", rfm_index);
+      HRSC_write_conf_mult(sc_file);
+    }
+  }
+  fclose(sc_file);
+  char command[128];
+  sprintf(command,
+          "scp -P 1122 %s mim@193.48.81.203:/mim/soft/eda/config_history/",
+          sc_filename);
+  system(command);
+
+  log_printf("read register reset done\n");
+  log_flush();
+  sleep(1); // let DACs stabilize
+
+  return 0;
+}
 
 // static variables, with file-scope
 // are persistent between function calls and

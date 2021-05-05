@@ -358,4 +358,33 @@ void PRINT_hr_data(FILE *output, alt_u32 nb_evt);
 void PRINT_config(FILE *file_conf, int rfm);
 void PRINT_dump_registers(FILE *output);
 
+typedef struct Device {
+  // run-dependant settings
+  alt_u32 thresh_delta;
+  alt_u32 rshaper;
+  alt_u32 rfm_on;
+
+  char *ip_addr;
+  int run_cnt;
+
+  // baseline settings
+  alt_u32 dac_floor_table[NB_RFM * NB_HR * 3];
+  alt_u32 pa_gain_table[NB_RFM * NB_HR * 64];
+  alt_u32 mask_table[NB_RFM * NB_HR * 64];
+
+  int sock_cp;
+  int sock_ctl;
+
+  int mem_fd;
+
+  int i2c_file;
+} Device_t;
+
+Device_t *new_device();
+
+int device_configure(Device_t *ctx, alt_u32 thresh, alt_u32 rshaper,
+                     alt_u32 rfm, const char *ip, int run);
+int device_initialize(Device_t *ctx);
+void device_free(Device_t *ctx);
+
 #endif // !EDA_DEVICE_H
