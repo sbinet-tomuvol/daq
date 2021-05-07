@@ -120,7 +120,7 @@ from ubuntu:12.04
 run apt-get update -y
 run apt-get install -y \
 	bc binutils bison \
-	coreutils \
+	coreutils curl \
 	diffutils \
 	flex \
 	git \
@@ -130,6 +130,14 @@ run apt-get install -y \
 	texinfo \
 	u-boot-tools unzip \
 	;
+
+env GOVERSION 1.16.4
+run curl -O -L https://golang.org/dl/go${GOVERSION}.linux-amd64.tar.gz && \
+	tar -C /usr/local -xf go${GOVERSION}.linux-amd64.tar.gz && \
+	/bin/rm ./go${GOVERSION}.linux-amd64.tar.gz
+env PATH /usr/local/go/bin:$PATH
+
+run go version
 
 add ./linux-socfpga /build/linux
 add ./hwlib         /build/soc_eds/ip/altera/hps/altera_hps/hwlib
