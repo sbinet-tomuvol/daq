@@ -2,7 +2,7 @@
 
 CROSS_COMPILE = arm-linux-gnueabihf-
 CFLAGS = -static -g -Wall -std=c99 -D_GNU_SOURCE=1 -I${SOCEDS_DEST_ROOT}/ip/altera/hps/altera_hps/hwlib/include -I.
-LDFLAGS =  -g -Wall
+LDFLAGS = -pthread
 CC = $(CROSS_COMPILE)gcc
 ARCH= arm
 

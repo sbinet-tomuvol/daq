@@ -30,6 +30,8 @@
 #include "config.h"
 #include "logger.h"
 
+#include <pthread.h>
+
 struct Device {
   // run-dependant settings
   alt_u32 thresh_delta;
@@ -52,6 +54,12 @@ struct Device {
   char daq_filename[128];
   FILE *daq_file;
   alt_u32 cycle_id; // run counters
+
+  struct {
+    pthread_t id;
+    int rc;
+    FILE *daq;
+  } task[NB_RFM]; // run-loop status
 };
 
 #define PORT 8877
@@ -71,7 +79,7 @@ int device_init_fpga(Device_t *ctx);
 int device_init_hrsc(Device_t *ctx);
 
 int device_init_run(Device_t *ctx);
-int device_loop(Device_t *ctx);
+void *device_loop(void *ctx);
 
 void give_file_to_server(char *filename, int sock);
 
@@ -456,11 +464,56 @@ int device_start(Device_t *ctx) {
   ctx->cycle_id = 0;
   SYNC_fifo_arming();
 
+  //  for (int i = 0; i < NB_RFM; i++) {
+  //    if (((ctx->rfm_on >> i) & 1) == 0) {
+  //      continue;
+  //    }
+  //    err = pthread_create(&ctx->task[i].id, NULL, device_loop, (void *)ctx);
+  //    if (err != 0) {
+  //      log_printf("could not create worker for RFM=%d: err=%d\n", i, err);
+  //      log_flush();
+  //      return err;
+  //    }
+  //  }
+
+  err = pthread_create(&ctx->task[0].id, NULL, device_loop, (void *)ctx);
+  if (err != 0) {
+    log_printf("could not create worker: err=%d\n", err);
+    log_flush();
+    return err;
+  }
+
   return 0;
 }
 
 int device_wait(Device_t *ctx) {
-  //
+  int err = 0;
+  //  for (int i = 0; i < NB_RFM; i++) {
+  //    if (((ctx->rfm_on >> i) & 1) == 0) {
+  //      continue;
+  //    }
+  //    pthread_join(ctx->task[i].id, (void **)(&ctx->task[i].rc));
+  //    if (ctx->task[i].rc != 0) {
+  //      err = ctx->task[i].rc;
+  //      log_printf("error joining worker for RFM=%d: err=%d\n", i, err);
+  //      log_flush();
+  //    }
+  //  }
+
+  err = pthread_join(ctx->task[0].id, (void **)(&ctx->task[0].rc));
+  if (err != 0) {
+    log_printf("could not join worker: err=%d\n", err);
+    log_flush();
+    return err;
+  }
+
+  if (ctx->task[0].rc != 0) {
+    err = ctx->task[0].rc;
+    log_printf("error during worker loop: err=%d\n", err);
+    log_flush();
+    return err;
+  }
+
   return 0;
 }
 
@@ -515,7 +568,12 @@ int device_init_run(Device_t *ctx) {
   return 0;
 }
 
-int device_loop(Device_t *ctx) {
+void *device_loop(void *argp) {
+
+  Device_t *ctx = (Device_t *)argp;
+  int id = pthread_self();
+  ctx->task[id].rc = 0;
+
   int file_cnt = 0;
   //----------- run loop -----------------
   while (g_state == 1) {
@@ -527,7 +585,7 @@ int device_loop(Device_t *ctx) {
     }
     if (g_state == 0) {
       break;
-	}
+    }
 
     log_printf("\treadout\n");
     log_flush();
@@ -537,23 +595,25 @@ int device_loop(Device_t *ctx) {
     }
     if (g_state == 0) {
       break;
-	}
+    }
 
     // read hardroc data
     log_printf("\tbuffering\n");
     log_flush();
     for (int rfm_index = 0; rfm_index < NB_RFM; rfm_index++) {
-      if (((ctx->rfm_on >> rfm_index) & 1) == 1) {
-        log_printf("\t\trfm %d\n", rfm_index);
-        log_flush();
-        DAQ_bufferize_data_DIF(rfm_index);
-        if (g_state == 0)
-          break;
+      if (((ctx->rfm_on >> rfm_index) & 1) == 0) {
+        continue;
+      }
+      log_printf("\t\trfm %d\n", rfm_index);
+      log_flush();
+      DAQ_bufferize_data_DIF(rfm_index);
+      if (g_state == 0) {
+        break;
       }
     }
     SYNC_fifo_ack();
-    
-	// write data file
+
+    // write data file
     log_printf("\tfwrite\n");
     log_flush();
     DAQ_write_buffer(ctx->daq_file);
@@ -574,7 +634,8 @@ int device_loop(Device_t *ctx) {
   }
   CNT_stop();
 
-  return 0;
+  pthread_exit((void *)(&ctx->task[id].rc));
+  return NULL;
 }
 
 void give_file_to_server(char *filename, int sock) {
