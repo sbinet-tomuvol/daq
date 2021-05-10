@@ -43,6 +43,11 @@ func Docker() error {
 		return fmt.Errorf("could not mount altera-hps directory: %w", err)
 	}
 
+	err = os.WriteFile(filepath.Join(dir, "gen.go"), []byte(cgoBoot), 0644)
+	if err != nil {
+		return fmt.Errorf("could not create cgo x-compile bootstrap: %w", err)
+	}
+
 	cmd := exec.Command(
 		"git", "clone", "--branch", "socfpga-3.10-ltsi",
 		"git@github.com:sbinet-lpc/tomuvol-linux-socfpga",
@@ -139,6 +144,17 @@ env PATH /usr/local/go/bin:$PATH
 
 run go version
 
+add ./gen.go        /tmp/x-cgo/gen.go
+
+run cd /tmp/x-cgo && \
+	go mod init xcgo && \
+	go get github.com/go-sql-driver/mysql && \
+	GOARCH=arm CC=arm-linux-gnueabihf-gcc CC_FOR_TARGET=arm-linux-gnueabihf-gcc \
+	CGO_ENABLED=1 \
+	go build -o /dev/null -v . && \
+	cd / && \
+	/bin/rm -fr /tmp/x-cgo
+
 add ./linux-socfpga /build/linux
 add ./hwlib         /build/soc_eds/ip/altera/hps/altera_hps/hwlib
 
@@ -180,3 +196,24 @@ func mountHwLib(name string) error {
 
 	return nil
 }
+
+const cgoBoot = `package main
+
+//
+import "C"
+
+import (
+	_ "log"
+	_ "flag"
+	_ "os"
+	_ "io"
+	_ "encoding/binary"
+	_ "encoding/json"
+	_ "net"
+	_ "net/http"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+func main() {}
+`
