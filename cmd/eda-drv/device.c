@@ -325,6 +325,7 @@ int device_init_fpga(Device_t *ctx) {
 }
 
 int device_init_hrsc(Device_t *ctx) {
+  int err = 0;
   HRSC_set_bit(0, 854,
                0); // disable trig_out output pin (RFM v1 coupling problem)
   HRSC_set_shaper_resis(0, ctx->rshaper);
@@ -419,7 +420,12 @@ int device_init_hrsc(Device_t *ctx) {
   sprintf(command,
           "scp -P 1122 %s mim@193.48.81.203:/mim/soft/eda/config_history/",
           sc_filename);
-  system(command);
+  err = system(command);
+  if (err != 0) {
+    log_printf("could not send config to history store: err=%d\n", err);
+    log_flush();
+    return err;
+  }
 
   log_printf("read register reset done\n");
   log_flush();

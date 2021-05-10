@@ -686,6 +686,7 @@ void HRSC_set_word_msb2lsb(alt_u32 hr_addr, alt_u32 bit_addr, alt_u32 n_bits,
 }
 
 int HRSC_read_conf_singl(FILE *file_conf, alt_u32 hr_addr) {
+  ssize_t n = 0;
   alt_u32 bit_addr, bit;
   alt_u32 cnt = NB_BITS_CFG_HR - 1;
   int delimiter = ';';
@@ -694,18 +695,39 @@ int HRSC_read_conf_singl(FILE *file_conf, alt_u32 hr_addr) {
   // printf("bit_addr\tbit_value\n");
   while (!feof(file_conf)) {
     // bit addr
-    getdelim(&str, &len, delimiter, file_conf);
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
     if (str[0] == '#') { // if comment line, skip
-      getline(&str, &len, file_conf);
-      getdelim(&str, &len, delimiter, file_conf);
+      n = getline(&str, &len, file_conf);
+      if (n == 0) {
+        continue;
+      }
+      n = getdelim(&str, &len, delimiter, file_conf);
+      if (n == 0) {
+        continue;
+      }
     }
     bit_addr = atoi(str);
     // skip reg name and indices
-    getdelim(&str, &len, delimiter, file_conf);
-    getdelim(&str, &len, delimiter, file_conf);
-    getdelim(&str, &len, delimiter, file_conf);
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
     // bit value
-    getline(&str, &len, file_conf);
+    n = getline(&str, &len, file_conf);
+    if (n == 0) {
+      continue;
+    }
     bit = atoi(str);
     // check bit address
     if (bit_addr != cnt) {
@@ -733,6 +755,7 @@ void HRSC_copy_conf(alt_u32 hr_addr_source, alt_u32 hr_addr_dest) {
 }
 
 int HRSC_read_conf_mult(FILE *file_conf) {
+  ssize_t n = 0;
   alt_u32 hr_addr, bit_addr, bit;
   alt_u32 cnt_bit = NB_BITS_CFG_HR - 1;
   alt_u32 cnt_hr = NB_HR - 1;
@@ -741,13 +764,22 @@ int HRSC_read_conf_mult(FILE *file_conf) {
   size_t len = 0;
   while (!feof(file_conf) && (cnt_bit >= 0) && (cnt_hr >= 0)) {
     // hr_addr
-    getdelim(&str, &len, delimiter, file_conf);
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
     hr_addr = atoi(str);
     // bit addr
-    getdelim(&str, &len, delimiter, file_conf);
+    n = getdelim(&str, &len, delimiter, file_conf);
+    if (n == 0) {
+      continue;
+    }
     bit_addr = atoi(str);
     // bit value
-    getline(&str, &len, file_conf);
+    n = getline(&str, &len, file_conf);
+    if (n == 0) {
+      continue;
+    }
     bit = atoi(str);
     // check hr and bit addresses
     if (bit_addr != cnt_bit) {
