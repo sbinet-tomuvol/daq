@@ -1,3 +1,5 @@
+// +build arm
+
 #ifndef __ALT_TYPES_H__
 #define __ALT_TYPES_H__
 

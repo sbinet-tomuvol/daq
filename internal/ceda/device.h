@@ -1,3 +1,5 @@
+// +build arm
+
 #ifndef EDA_DEVICE_H
 #define EDA_DEVICE_H 1
 

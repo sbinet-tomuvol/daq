@@ -1,3 +1,5 @@
+// +build arm
+
 #ifndef EDA_LOGGER_H
 #define EDA_LOGGER_H 1
 

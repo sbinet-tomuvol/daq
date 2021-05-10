@@ -1,3 +1,5 @@
+// +build arm
+
 /*
  * Copyright 2020
  * Baptiste Joly <baptiste.joly@clermont.in2p3.fr>

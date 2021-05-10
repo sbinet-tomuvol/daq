@@ -1,3 +1,5 @@
+// +build arm
+
 #ifndef EDA_FPGA_H
 #define EDA_FPGA_H 1
 

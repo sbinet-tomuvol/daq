@@ -1,3 +1,5 @@
+// +build arm
+
 #ifndef EDA_CONFIG_H
 #define EDA_CONFIG_H 1
 
