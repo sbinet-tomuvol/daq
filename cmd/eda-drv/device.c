@@ -97,8 +97,8 @@ Device_t *new_device() {
   return ctx;
 }
 
-int device_configure(Device_t *ctx, alt_u32 thresh, alt_u32 rshaper,
-                     alt_u32 rfm, const char *ip, int run) {
+int device_configure(Device_t *ctx, uint32_t thresh, uint32_t rshaper,
+                     uint32_t rfm, const char *ip, int run) {
   ctx->thresh_delta = thresh;
   ctx->rshaper = rshaper;
   ctx->rfm_on = rfm;

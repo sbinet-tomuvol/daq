@@ -1,16 +1,17 @@
 .PHONY: build
 
 CROSS_COMPILE = arm-linux-gnueabihf-
-CFLAGS = -static -g -Wall -std=c99 -D_GNU_SOURCE=1 -I${SOCEDS_DEST_ROOT}/ip/altera/hps/altera_hps/hwlib/include -I.
-LDFLAGS = -pthread
+CFLAGS = -g -Wall -Wunused-result -std=c99 -D_GNU_SOURCE=1 -I${SOCEDS_DEST_ROOT}/ip/altera/hps/altera_hps/hwlib/include -I.
+LDFLAGS = -pthread -static
 CC = $(CROSS_COMPILE)gcc
-ARCH= arm
+ARCH = arm
 
 
 all: build
 
-bin/eda-drv: bin cmd/eda-drv/*.c
-	$(CC) $(LDFLAGS) $(CFLAGS) -I./cmd/eda-drv -o $@ cmd/eda-drv/*.c
+bin/eda-drv: bin
+	GOARCH=arm CC=$(CC) CC_FOR_TARGET=$(CC) CGO_ENABLED=1 \
+		   go build -o ./bin/eda-drv -v -tags=netgo ./cmd/eda-drv
 
 clean:
 	/bin/rm -fr ./bin
